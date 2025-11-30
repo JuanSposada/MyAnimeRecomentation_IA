@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Recomendador de Anime</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>✨ Recomendador de Anime (API Flask)</h1>
+        <p>Ingresa el nombre exacto de un anime popular para recibir 10 recomendaciones similares.</p>
+
+        <div class="input-group">
+            <input type="text" id="animeInput" placeholder="Ej: Death Note">
+            <button onclick="getRecommendations()">Recomendar</button>
+        </div>
+
+        <!-- 🔵 SPINNER (NO CAMBIA TU DISEÑO) -->
+        <div id="spinner" class="spinner" style="display: none;"></div>
+
+        <div id="resultsArea"></div>
+    </div>
+
+    <script src="{{ url_for('static', filename='index.js') }}"></script> 
+</body>
+</html>

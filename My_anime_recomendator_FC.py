@@ -1,132 +1,123 @@
 import pandas as pd
-import kagglehub
+import pickle
+import os
+import sys # Útil para salir del script si no hay matriz disponible
 
-# La ruta donde se descargó el dataset (esto ya lo ejecutaste)
-dataset_path = kagglehub.dataset_download("CooperUnion/anime-recommendations-database")
-print("Dataset descargado en:", dataset_path)
+# --- CONFIGURACIÓN ---
+MODEL_FILE = "anime_similarity_matrix.pkl"
+item_similarity_df = None
 
-# Construir las rutas completas a los archivos
-ratings_file = f"{dataset_path}/rating.csv"
-anime_file = f"{dataset_path}/anime.csv"
+# --- LÓGICA DE CARGA Y ENTRENAMIENTO CONDICIONAL ---
 
-# Cargar los DataFrames
-df_ratings = pd.read_csv(ratings_file)
-df_anime = pd.read_csv(anime_file)
+if os.path.exists(MODEL_FILE):
+    # 1. INTENTAR CARGAR EL MODELO
+    print(f"✅ Archivo de modelo encontrado: '{MODEL_FILE}'. Cargando...")
+    try:
+        with open(MODEL_FILE, 'rb') as file:
+            item_similarity_df = pickle.load(file)
+        print(f"Matriz de Similitud cargada. Tamaño: {item_similarity_df.shape}")
+        
+    except Exception as e:
+        # Si hay un error (por ejemplo, el archivo está corrupto), lo notifica y fuerza el re-entrenamiento
+        print(f"❌ Error al cargar el archivo de modelo: {e}. Se procederá a generar uno nuevo.")
+        item_similarity_df = None
+        
+else:
+    print(f"❌ Archivo de modelo no encontrado: '{MODEL_FILE}'. Se procederá a generar la matriz (ENTRENAMIENTO).")
 
-print("DataFrame de Calificaciones (df_ratings) cargado con", len(df_ratings), "filas.")
-print("DataFrame de Anime (df_anime) cargado con", len(df_anime), "filas.")
 
-# Eliminar las filas donde el rating es -1
-df_ratings_clean = df_ratings[df_ratings['rating'] != -1]
+if item_similarity_df is None:
+    # 2. BLOQUE DE ENTRENAMIENTO (SOLO si el modelo no pudo cargarse)
+    
+    # Importaciones que solo son necesarias para el entrenamiento
+    try:
+        import kagglehub
+        from scipy.sparse import csr_matrix
+        from sklearn.metrics.pairwise import cosine_similarity
+    except ImportError:
+        print("\n¡ERROR! Faltan librerías necesarias para el entrenamiento (kagglehub, scipy, sklearn).")
+        sys.exit(1) # Detiene la ejecución si no puede entrenar
+        
+    print("\n--- INICIANDO PROCESO DE ENTRENAMIENTO ---")
+    
+    # Descarga y Carga de datos
+    # La ruta donde se descargó el dataset
+    dataset_path = kagglehub.dataset_download("CooperUnion/anime-recommendations-database")
+    ratings_file = f"{dataset_path}/rating.csv"
+    anime_file = f"{dataset_path}/anime.csv"
 
-print("Filas eliminadas (rating = -1):", len(df_ratings) - len(df_ratings_clean))
-print("Filas restantes para el modelo:", len(df_ratings_clean))
+    # Cargar los DataFrames
+    df_ratings = pd.read_csv(ratings_file)
+    df_anime = pd.read_csv(anime_file)
+    print("DataFrames de entrada cargados.")
 
-print("\n--- Vista previa de df_ratings_clean ---")
-print(df_ratings_clean.head())
+    # Limpieza y Filtro
+    df_ratings_clean = df_ratings[df_ratings['rating'] != -1]
+    df_merged = pd.merge(df_ratings_clean, df_anime[['anime_id', 'name']], on='anime_id', how='inner')
 
-print("\n--- Información de df_anime ---")
-print(df_anime.info())
+    # Filtro por popularidad (min 50 calificaciones)
+    anime_rating_counts = df_merged.groupby('name')['rating'].count()
+    popular_animes = anime_rating_counts[anime_rating_counts >= 50].index
+    df_filtered_anime = df_merged[df_merged['name'].isin(popular_animes)]
 
-# Combinar los DataFrames
-# Usamos un 'inner' merge para asegurar que solo incluimos animes que tienen calificaciones y viceversa.
-df_merged = pd.merge(df_ratings_clean,
-                     df_anime[['anime_id', 'name']], # Solo necesitamos 'anime_id' y 'name' del df_anime
-                     on='anime_id',
-                     how='inner')
+    # Filtro por usuarios activos (min 50 calificaciones)
+    user_rating_counts = df_filtered_anime.groupby('user_id')['rating'].count()
+    active_users = user_rating_counts[user_rating_counts >= 50].index
+    df_final = df_filtered_anime[df_filtered_anime['user_id'].isin(active_users)]
+    print(f"Datos filtrados. Filas finales: {len(df_final)}")
 
-print(f"DataFrame Combinado (df_merged) creado con {len(df_merged)} filas.")
-print("\n--- Vista previa de df_merged ---")
-print(df_merged.head())
+    # Creación de la Matriz y Cálculo de Similitud
+    user_item_matrix = df_final.pivot_table(index='user_id', columns='name', values='rating').fillna(0)
+    sparse_matrix = csr_matrix(user_item_matrix.values)
+    item_user_matrix = sparse_matrix.T
+    item_similarity = cosine_similarity(item_user_matrix)
+    item_similarity_df = pd.DataFrame(item_similarity,
+                                      index=user_item_matrix.columns,
+                                      columns=user_item_matrix.columns)
+    
+    print("\n--- ¡Matriz de Similitud Generada! ---")
 
-# Contar cuántas calificaciones tiene cada anime (por nombre)
-anime_rating_counts = df_merged.groupby('name')['rating'].count()
+    # 3. GUARDAR la matriz recién generada
+    print(f"Guardando la matriz de similitud en '{MODEL_FILE}'...")
+    try:
+        with open(MODEL_FILE, 'wb') as file:
+            pickle.dump(item_similarity_df, file)
+        print("¡Matriz guardada con éxito para la próxima vez!")
+    except Exception as e:
+        print(f"❌ Error al guardar la matriz de similitud: {e}")
+        
+# --- FIN DE LA LÓGICA DE CARGA Y ENTRENAMIENTO ---
 
-# Identificar los animes que cumplen el umbral (e.g., al menos 50 calificaciones)
-popular_animes = anime_rating_counts[anime_rating_counts >= 50].index
+if item_similarity_df is None:
+    # Esto ocurre si el entrenamiento falló o si el script no pudo importar librerías
+    print("\nNo se pudo obtener la Matriz de Similitud. El proceso de recomendación no puede continuar.")
+    sys.exit(1)
 
-# Filtrar el DataFrame combinado para incluir solo los animes populares
-df_filtered_anime = df_merged[df_merged['name'].isin(popular_animes)]
 
-print(f"Animes restantes después del filtro (min 50 calificaciones): {len(popular_animes)} de {len(anime_rating_counts)}")
-print(f"Filas restantes en el DF: {len(df_filtered_anime)}")
-
-# Contar cuántas calificaciones ha dado cada usuario
-user_rating_counts = df_filtered_anime.groupby('user_id')['rating'].count()
-
-# Identificar los usuarios que cumplen el umbral (e.g., al menos 50 calificaciones)
-active_users = user_rating_counts[user_rating_counts >= 50].index
-
-# Filtrar el DataFrame final
-df_final = df_filtered_anime[df_filtered_anime['user_id'].isin(active_users)]
-
-print(f"Usuarios restantes después del filtro (min 50 calificaciones): {len(active_users)}")
-print(f"Filas finales listas para modelar: {len(df_final)}")
-
-# Crear la matriz Usuario-Ítem (Matriz de Interacción)
-user_item_matrix = df_final.pivot_table(
-    index='user_id',
-    columns='name',
-    values='rating'
-)
-
-print("\n--- Vista previa de la Matriz de Interacción (User-Item Matrix) ---")
-print(user_item_matrix.head())
-print(f"Tamaño de la Matriz: {user_item_matrix.shape}")
-
-from scipy.sparse import csr_matrix
-
-# Rellenar los NaN con 0. Esto es común antes de aplicar la similitud de coseno,
-# pero OJO: el 0 aquí significa "sin calificación", NO "calificación de 0".
-matrix_for_similarity = user_item_matrix.fillna(0)
-
-# Convertir la matriz de Pandas a una matriz dispersa (CSR Matrix)
-# Esto reduce el consumo de memoria y acelera los cálculos.
-sparse_matrix = csr_matrix(matrix_for_similarity.values)
-
-from sklearn.metrics.pairwise import cosine_similarity
-
-# 1. Transponer la matriz para calcular la similitud entre columnas (Animes)
-# La matriz debe ser Ítem-Usuario (Anime-Usuario)
-item_user_matrix = sparse_matrix.T
-
-# 2. Calcular la similitud de coseno
-# Esto resulta en una matriz (5172 x 5172) donde cada celda [i, j] es la similitud entre el Anime i y el Anime j.
-item_similarity = cosine_similarity(item_user_matrix)
-
-# 3. Convertir la matriz de similitud de vuelta a un DataFrame para fácil acceso (opcional)
-item_similarity_df = pd.DataFrame(item_similarity,
-                                  index=user_item_matrix.columns,
-                                  columns=user_item_matrix.columns)
-
-print("\n--- Vista previa de la Matriz de Similitud entre Animes ---")
-print(item_similarity_df.head())
-
+## --- FUNCIÓN DE RECOMENDACIÓN (USO) ---
+# Esta parte siempre se ejecuta, ya sea con la matriz cargada o recién creada.
 
 def recommend_animes(anime_name, similarity_df, top_n=10):
     """
     Recomienda animes basados en la similitud de coseno con un anime dado.
     """
+    # ... (Tu función original sin cambios)
     if anime_name not in similarity_df.index:
         return "Anime no encontrado en la matriz de similitud. Asegúrate de que el nombre sea exacto."
 
-    # Obtener las puntuaciones de similitud para el anime_name
     similar_scores = similarity_df[anime_name]
-
-    # Ordenar los animes por puntuación de similitud de forma descendente
-    # Excluir el propio anime_name (similitud 1.0)
     recommendations = similar_scores.sort_values(ascending=False)
     recommendations = recommendations.drop(labels=anime_name, errors='ignore')
 
-    # Devolver los N principales
     return recommendations.head(top_n)
 
-# EJEMPLO de uso:
-# Asegúrate de usar un nombre de anime EXACTO que esté en las columnas de user_item_matrix
-anime_ejemplo = 'Cowboy Bebop' # Reemplaza con un nombre de tu matriz
-if anime_ejemplo in item_similarity_df.index:
-    print(f"\n--- Recomendaciones para {anime_ejemplo} ---")
-    recommendations = recommend_animes(anime_ejemplo, item_similarity_df)
+# --- EJEMPLO de uso: ---
+user_anime_input = input("\nIngresa el nombre de un anime que te guste (Ej: Death Note): ") 
+
+if user_anime_input in item_similarity_df.index:
+    print(f"\n--- Recomendaciones para {user_anime_input} ---")
+    recommendations = recommend_animes(user_anime_input, item_similarity_df)
     print(recommendations)
 else:
-    print(f"El anime '{anime_ejemplo}' no está en el conjunto de animes populares.")
+    print(f"El anime '{user_anime_input}' no está en el conjunto de animes populares/activos.")
+    
